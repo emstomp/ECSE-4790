@@ -73,27 +73,29 @@ int main(void)
 //    *GREENLEDODR ^= (uint16_t)0x0020U; // Toggle Green LED (LED2)
 
 
-    // 220 24
+    printf("\033[48;5;24m"); 	// set background color
+    printf("\033[38;5;220m"); 	// set foreground color
+    fflush(stdout);
 
-    // printf("\033[220;5;24m"); // blue background and yellow characters
-    fflush(stdout);
-    printf("\033[2;19H"); // center instruction text on line 2. cols: 80, rows: 24
-    fflush(stdout);
+    // color whole terminal
+    for (int i = 0; i < 720; i++) printf(" ");
+
+    printf("\033[2;19H"); 		// center instruction text on line 2
     printf("Enter <ESC> or <CTRL> + [ to terminate\r\n\n");
+
+    // character counter
+    printf("\033[22;1H");
+    printf("# of characters received:\r\n");
+
+    printf("\033[23;1H");
+    printf("Printable\t\tNon-Printable");
 
     while(1)
     {
-    	// character counter
-    	printf("\033[22;1H");
-    	fflush(stdout);
-    	printf("# of characters received:\r\n");
 
-    	printf("\033[23;1H");
-    	fflush(stdout);
-    	printf("Printable\t\tNon-Printable");
-
+    	// update character count
     	printf("\033[24;1H");
-    	printf("%d\t\t%d", printableChars, nonPrintableChars);
+    	printf("%d\t\t\t%d", printableChars, nonPrintableChars);
     	fflush(stdout);
 
     	inputChar = getchar();
@@ -105,25 +107,18 @@ int main(void)
 
     		printableChars++;
 
-    		// log character
-    		// printf("\033[4;5H");
-    		// fflush(stdout);
-
-    		// printf("The keyboard character is %c.\r\n\n", inputChar);
-
     	} else { // non-printable characters
 
     		nonPrintableChars++;
 
-    		// move cursor
-    		printf("\033[18;1H");
-    		//printf("\033[220;5;32m"); // set text red
+    		printf("\033[18;1H");		// move cursor
+    		printf("\033[38;5;196m"); 	// set text red
     		fflush(stdout);
-    		printf("The received value %x is ", inputChar);
-    		//printf("\033[4m"); // underline
+    		printf("The received value $%02x is ", inputChar);
+    		printf("\033[4m"); 			// underline
     		printf("'not printable'");
-    		//printf("\033[24m.\r\n"); // un-underline
-    		// printf("\033[220;5;24m"); // set text back to yellow
+    		printf("\033[24m.\r\n"); 	// un-underline
+    		printf("\033[38;5;220m"); 	// set text back to yellow
     		fflush(stdout);
 
     	}
