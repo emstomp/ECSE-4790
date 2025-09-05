@@ -21,8 +21,12 @@
 #include <stdint.h>
 
 #define ESC_KEY 27
+#define COLS 80
+#define ROWS 24
 
 char inputChar;
+int printableChars = 0;
+int nonPrintableChars = 0;
 //------------------------------------------------------------------------------------
 // MAIN Routine
 //------------------------------------------------------------------------------------
@@ -68,17 +72,29 @@ int main(void)
 //    volatile uint32_t * GREENLEDODR = (uint32_t*) 0x40022414U; // Address of GPIO J Output Data Register
 //    *GREENLEDODR ^= (uint16_t)0x0020U; // Toggle Green LED (LED2)
 
-    printf("\0333[44;33m"); // blue background and yellow characters
-    fflush();
-    // TODO: center instruction text on line 2. cols: 80, rows: 24
-    printf("\033[2;19H");
-    fflush();
+
+    // 220 24
+
+    // printf("\033[220;5;24m"); // blue background and yellow characters
+    fflush(stdout);
+    printf("\033[2;19H"); // center instruction text on line 2. cols: 80, rows: 24
+    fflush(stdout);
     printf("Enter <ESC> or <CTRL> + [ to terminate\r\n\n");
-    printf("\033[4;1H");
-    fflush();
 
     while(1)
     {
+    	// character counter
+    	printf("\033[22;1H");
+    	fflush(stdout);
+    	printf("# of characters received:\r\n");
+
+    	printf("\033[23;1H");
+    	fflush(stdout);
+    	printf("Printable\t\tNon-Printable");
+
+    	printf("\033[24;1H");
+    	printf("%d\t\t%d", printableChars, nonPrintableChars);
+    	fflush(stdout);
 
     	inputChar = getchar();
 
@@ -86,9 +102,30 @@ int main(void)
     		printf("program terminated.\r\n\n");
     		return 1;
     	} else if (inputChar >= 32 && inputChar <= 126) { // printable characters
-    		printf("The keyboard character is %c.\r\n\n", inputChar);
-    	} else {
-    		printf("The received value is not printable\r\n\n");
+
+    		printableChars++;
+
+    		// log character
+    		// printf("\033[4;5H");
+    		// fflush(stdout);
+
+    		// printf("The keyboard character is %c.\r\n\n", inputChar);
+
+    	} else { // non-printable characters
+
+    		nonPrintableChars++;
+
+    		// move cursor
+    		printf("\033[18;1H");
+    		//printf("\033[220;5;32m"); // set text red
+    		fflush(stdout);
+    		printf("The received value %x is ", inputChar);
+    		//printf("\033[4m"); // underline
+    		printf("'not printable'");
+    		//printf("\033[24m.\r\n"); // un-underline
+    		// printf("\033[220;5;24m"); // set text back to yellow
+    		fflush(stdout);
+
     	}
 
     	/** // Hello world
