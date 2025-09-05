@@ -167,8 +167,21 @@ void drawScreen(){ //idk why the pointer fixes it but stackoverflow knows better
     if (fault == 1){
     	printf("\033[16;0H");
     	printf("\033[38;5;196m");//foreground red
-    	printf("The received value $%x is ’not printable’",inputChar);
+    	printf("The received value $%x is ’not printable’ ",inputChar);
     	printf("\033[38;5;220m");//foreground normal
+
+    	fflush(stdout);
+    	HAL_Delay(100);
+    	printf("\033[16;0H");
+    	printf("\033[48;5;196m");//background
+    	printf("The received value $%x is ’not printable’ ",inputChar);
+    	fflush(stdout);
+    	HAL_Delay(100);
+    	printf("\033[16;0H");
+    	printf("The received value $%x is ’not printable’ ",inputChar);
+    	printf("\033[48;5;24m");//background
+    	fflush(stdout);
+
     }else{
     	printf("\033[16;0H");
 		for(int i =0;i<80;i++){	// line of dashes to show the end of the printable zone
