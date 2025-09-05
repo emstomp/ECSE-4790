@@ -94,14 +94,15 @@ int main(void)
     	HAL_Delay(100);
 
     	if (id >= 720){
-    		id-=72;
+    		id = id - 73;
     		for(int i=0;i<9;i++){
     			for(int j=0;j<72;j++){
     				arr[i][j] = arr[i+1][j];//move all the data one row down.
+
     			};
     		};
 			for(int j=0;j<72;j++){
-				arr[10][j] = 46;//46 is asci for period
+				arr[9][j] = 46;//46 is asci for period
 			};
 
     		//make it erase the first row and do the data thing
@@ -168,7 +169,10 @@ void drawScreen(){
         printf("\033[%d;5H", i+4);          // move to row i+4, col 4
         printf("%.*s", 72, arr[i]);         // print 72 chars from arr[i] in one go
     }
-
+    printf("\033[14;0H");
+    for(int i =0;i<80;i++){
+        	printf("-");
+        }
     fflush(stdout);
 //    HAL_Delay(100);
 }
