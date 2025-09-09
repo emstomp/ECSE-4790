@@ -2,271 +2,246 @@
 // Hello.c
 //------------------------------------------------------------------------------------
 //
-// Test program to demonstrate serial port I/O.  This program writes a message on
+// Test program to demonstrate serial port I/O. This program writes a message on
 // the console using the printf() function, and reads characters using the getchar()
-// function.  An ANSI escape sequence is used to clear the screen if a '2' is typed.
+// function. An ANSI escape sequence is used to clear the screen if a '2' is typed.
 // A '1' repeats the message and the program responds to other input characters with
 // an appropriate message.
 //
 // Any valid keystroke turns on the green LED on the board; invalid entries turn it off
 //
 
-
 //------------------------------------------------------------------------------------
 // Includes
 //------------------------------------------------------------------------------------
-#include "stm32f769xx.h"
-#include "hello.h"
+#include "stm32f769xx.h" // STM32 HAL header
+#include "hello.h"       // Custom header for this program
+#include <stdint.h>       // Fixed-width integer types
 
-uint8_t fault =0 ;
-#include <stdint.h>
+//------------------------------------------------------------------------------------
+// Global Variables
+//------------------------------------------------------------------------------------
+uint8_t fault = 0; // Indicates if a non-printable character was received
+#define ESC_KEY 27 // ASCII value for the Escape key
 
-#define ESC_KEY 27
-void drawScreen();
-void GPIOrun();
-char arr[10][72];
-uint16_t id=0;
-uint16_t PrintChar=0;
-uint16_t NotPrintChar=0;
-char badList[22]={127,9,12,13,16,17,18,19,20,33,34,35,36,37,38,39,40};
-//8 - Backspace (127)
-//9 - Tab
-//12 - 5 in the numeric keypad when Num Lock is off
-//13 - Enter
-//16 - Shift
-//17 - Ctrl
-//18 - Alt
-//19 - Pause/Break
-//20 - Caps Lock
-//27 - Esc
-//32 - Space
-//33 - Page Up
-//34 - Page Down
-//35 - End
-//36 - Home
-//37 - Left arrow
-//38 - Up arrow
-//39 - Right arrow
-//40 - Down arrow
-//44 - Print Screen
-//45 - Insert
-//46 - Delete
+void drawScreen(); // Function prototype for drawing the screen
+void GPIOrun();    // Function prototype for GPIO logic
 
-char inputChar;
+// Buffer to store characters for display (10 rows, 72 columns + null terminator)
+char arr[10][73];
+uint16_t id = 0;          // Current index in the buffer
+uint16_t PrintChar = 0;   // Count of printable characters received
+uint16_t NotPrintChar = 0; // Count of non-printable characters received
+
+// List of non-printable ASCII characters
+char badList[22] = {127, 9, 12, 13, 16, 17, 18, 19, 20, 33, 34, 35, 36, 37, 38, 39, 40};
+
+char inputChar; // Variable to store the current input character
+
 //------------------------------------------------------------------------------------
 // MAIN Routine
 //------------------------------------------------------------------------------------
 int main(void)
 {
-    Sys_Init(); // This always goes at the top of main (defined in init.c)
+    Sys_Init(); // Initialize the system (defined in init.c)
 
-    printf("\033[2J\033[;H"); // Erase screen & move cursor to home position
+    printf("\033[2J\033[;H"); // Clear the screen and move the cursor to the home position
 
-    fflush(stdout); // By default, the print buffer (stdout) is "LINE BUFFERED", that is
-                    // it only prints when a line is complete, usually done by adding '\n' to the end.
-                    // A partial line (without termination in a '\n') may be force to print using this command.
-                    // For other labs, we will change the stdout behavior to print immediately after
-                    // ANY printf() call, not just ones that contain a '\n'.
+    fflush(stdout); // Ensure the output buffer is flushed
 
+    HAL_Delay(1000); // Pause for a second
 
-    HAL_Delay(1000); // Pause for a second. This function blocks the program and uses the SysTick and
-    // Need to enable clock for peripheral bus on GPIO Port J
-    // Enable clocks for ports C, J, F
-    RCC->AHB1ENR |= RCC_AHB1ENR_GPIOCEN;  // GPIOC clock enable
-    RCC->AHB1ENR |= RCC_AHB1ENR_GPIOJEN;  // GPIOJ clock enable
-    RCC->AHB1ENR |= RCC_AHB1ENR_GPIOFEN;  // GPIOF clock enable
-    RCC->AHB1ENR |= RCC_AHB1ENR_GPIOAEN  // PA
-                   | RCC_AHB1ENR_GPIODEN; // PD
-    // Set PC6, PC7 as input (bits 12-15 in MODER)
-    GPIOC->MODER &= ~((3U << (6*2)) | (3U << (7*2)));
-    // Set PJ1 as input
-    GPIOJ->MODER &= ~(3U << (1*2));
-    // Set PF6 as input
-    GPIOF->MODER &= ~(3U << (6*2));
+    // Enable the clock for GPIO ports
+    RCC->AHB1ENR |= RCC_AHB1ENR_GPIOCEN;  // Enable GPIOC clock
+    RCC->AHB1ENR |= RCC_AHB1ENR_GPIOJEN;  // Enable GPIOJ clock
+    RCC->AHB1ENR |= RCC_AHB1ENR_GPIOFEN;  // Enable GPIOF clock
+    RCC->AHB1ENR |= RCC_AHB1ENR_GPIOAEN   // Enable GPIOA clock
+                   | RCC_AHB1ENR_GPIODEN; // Enable GPIOD clock
 
-    // Pull-up for PC6, PC7
-    GPIOC->PUPDR &= ~((3U << (6*2)) | (3U << (7*2)));  // clear bits first
-    GPIOC->PUPDR |=  ((1U << (6*2)) | (1U << (7*2)));  // set to 01 = pull-up
+    // Configure GPIO pins as input or output
+    GPIOC->MODER &= ~((3U << (6 * 2)) | (3U << (7 * 2))); // PC6, PC7 as input
+    GPIOJ->MODER &= ~(3U << (1 * 2));                    // PJ1 as input
+    GPIOF->MODER &= ~(3U << (6 * 2));                    // PF6 as input
 
-    // Pull-up for PJ1
-    GPIOJ->PUPDR &= ~(3U << (1*2));
-    GPIOJ->PUPDR |=  (1U << (1*2));
+    // Enable pull-up resistors for input pins
+    GPIOC->PUPDR &= ~((3U << (6 * 2)) | (3U << (7 * 2))); // Clear pull-up/down for PC6, PC7
+    GPIOC->PUPDR |= ((1U << (6 * 2)) | (1U << (7 * 2)));  // Set pull-up for PC6, PC7
+    GPIOJ->PUPDR &= ~(3U << (1 * 2));                    // Clear pull-up/down for PJ1
+    GPIOJ->PUPDR |= (1U << (1 * 2));                     // Set pull-up for PJ1
+    GPIOF->PUPDR &= ~(3U << (6 * 2));                    // Clear pull-up/down for PF6
+    GPIOF->PUPDR |= (1U << (6 * 2));                     // Set pull-up for PF6
 
-    // Pull-up for PF6
-    GPIOF->PUPDR &= ~(3U << (6*2));
-    GPIOF->PUPDR |=  (1U << (6*2));
+    // Configure output pins
+    GPIOJ->MODER &= ~((3U << (13 * 2)) | (3U << (5 * 2))); // Clear PJ13, PJ5
+    GPIOJ->MODER |= ((1U << (13 * 2)) | (1U << (5 * 2)));  // Set PJ13, PJ5 as output
+    GPIOA->MODER &= ~(3U << (12 * 2));                    // Clear PA12
+    GPIOA->MODER |= (1U << (12 * 2));                     // Set PA12 as output
+    GPIOD->MODER &= ~(3U << (4 * 2));                     // Clear PD4
+    GPIOD->MODER |= (1U << (4 * 2));                      // Set PD4 as output
 
+    // Initialize the display buffer with '.' characters
+    for (int i = 0; i < 10; i++) {
+        for (int j = 0; j < 72; j++) {
+            arr[i][j] = '.';
+        }
+        arr[i][72] = '\0'; // Null terminator for each row
+    }
 
-    // PJ13, PJ5 as outputs
-    GPIOJ->MODER &= ~((3U << (13*2)) | (3U << (5*2))); // clear
-    GPIOJ->MODER |=  ((1U << (13*2)) | (1U << (5*2))); // set as output
+    while (1) {
+        drawScreen(); // Update the screen
+        GPIOrun();    // Run GPIO logic
 
-    // PA12 as output
-    GPIOA->MODER &= ~(3U << (12*2));
-    GPIOA->MODER |=  (1U << (12*2));
+        // Clear Overrun Error if it occurred
+        if (USART1->ISR & USART_ISR_ORE) {
+            volatile char dump = (char)USART1->RDR; // Read RDR to clear the error
+            (void)dump;
+            USART1->ICR |= USART_ICR_ORECF; // Clear the overrun flag
+        }
 
-    // PD4 as output
-    GPIOD->MODER &= ~(3U << (4*2));
-    GPIOD->MODER |=  (1U << (4*2));
+        if ((inputChar = 0) != EOF) {//if you want to run the terminal thing put getChar instead of 0, get char blocks the GPIO from updating and I am not doing interups for ts
+            if (inputChar == ESC_KEY) {
+                break; // Exit the loop if the Escape key is pressed
+            }
 
+            uint8_t good = 1; // Flag to check if the character is printable
+            for (int k = 0; k < 22; k++) {
+                if (inputChar == badList[k]) {
+                    good = 0; // Mark as non-printable
+                    break;
+                }
+            }
 
+            if (good == 1) {
+                fault = 0; // Reset fault flag
+                PrintChar++; // Increment printable character count
 
+                if (id >= 720) {
+                    id = id - 73; // Adjust index to prevent overflow
 
+                    // Shift rows up to make space for new data
+                    for (int i = 0; i < 9; i++) {
+                        for (int j = 0; j < 72; j++) {
+                            arr[i][j] = arr[i + 1][j];
+                        }
+                    }
 
-	for (int i = 0; i < 10; i++) {
-	    for (int j = 0; j < 72; j++) {
-	        arr[i][j] = '.';
-	    }
-	    arr[i][72] = '\0'; // null terminator
-	}
-    while(1)
-    {
+                    // Clear the last row
+                    for (int j = 0; j < 72; j++) {
+                        arr[9][j] = '.'; // ASCII for period
+                    }
+                } else {
+                    // Save the character in the buffer
+                    arr[id / 72][id % 72] = inputChar;
+                }
 
-    	drawScreen();
-    	GPIOrun();
-
-    	//StackOverflow solution to the buffer overflowing, according to the guy who posted this "When I wrote this me and god knew how it works, now its just god"
-    	// Clear Overrun Error if it happened
-    	if (USART1->ISR & USART_ISR_ORE) {
-    	    volatile char dump = (char)USART1->RDR;     // read RDR to clear
-    	    (void)dump;
-    	    USART1->ICR |= USART_ICR_ORECF;             // clear the overrun flag
-    	}
-    	if ((inputChar = getchar()) != EOF){
-
-			if (inputChar == 27){
-				break;
-			}
-
-			uint8_t good = 1;
-			for(int k=0;k<22;k++){
-				if (inputChar == badList[k]){
-					good = 0;//Bools would be useful here but eh
-				}
-			}
-
-			if(good==1){
-				fault = 0;
-				PrintChar++;
-				if (id >= 720){
-					id = id - 73;
-					for(int i=0;i<9;i++){
-						for(int j=0;j<72;j++){
-							arr[i][j] = arr[i+1][j];//move all the data one row down.
-
-						};
-					};
-					for(int j=0;j<72;j++){
-						arr[9][j] = 46;//46 is asci for period
-					};
-				}else{
-					//save the character into the respective array
-					arr[id/72][id%72]=inputChar;
-				}
-				id++;
-			}else{
-				fault =1;
-				NotPrintChar++;
-				drawScreen();
-
-    	}}
-
+                id++; // Increment the buffer index
+            } else {
+                fault = 1; // Set fault flag
+                NotPrintChar++; // Increment non-printable character count
+                drawScreen(); // Update the screen
+            }
+        }
     }
 }
 
-void GPIOrun(){
+//------------------------------------------------------------------------------------
+// Function to handle GPIO logic
+//------------------------------------------------------------------------------------
+void GPIOrun() {
+    uint8_t state_PC6 = (GPIOC->IDR >> 6) & 0x1; // Read PC6
+    uint8_t state_PC7 = (GPIOC->IDR >> 7) & 0x1; // Read PC7
+    uint8_t state_PJ1 = (GPIOJ->IDR >> 1) & 0x1; // Read PJ1
+    uint8_t state_PF6 = (GPIOF->IDR >> 6) & 0x1; // Read PF6
 
-	uint8_t state_PC6 = (GPIOC->IDR >> 6) & 0x1;  // read PC6
-	uint8_t state_PC7 = (GPIOC->IDR >> 7) & 0x1;  // read PC7
-	uint8_t state_PJ1 = (GPIOJ->IDR >> 1) & 0x1;  // read PJ1
-	uint8_t state_PF6 = (GPIOF->IDR >> 6) & 0x1;  // read PF6
+    if (state_PC6) {
+        GPIOJ->BSRR = (1U << 13); // Turn on LED1
+    } else {
+        GPIOJ->BSRR = (1U << (13 + 16)); // Turn off LED1
+    }
 
-	if(state_PC6){
-    GPIOJ->BSRR = (1U << 13);  // LED1 on
-	}else{GPIOJ->BSRR = (1U << (13+16));} // LED1 off
+    if (state_PC7) {
+        GPIOJ->BSRR = (1U << 5); // Turn on LED2
+    } else {
+        GPIOJ->BSRR = (1U << (5 + 16)); // Turn off LED2
+    }
 
+    if (state_PJ1) {
+        GPIOA->BSRR = (1U << 12); // Turn on PA12
+    } else {
+        GPIOA->BSRR = (1U << (12 + 16)); // Turn off PA12
+    }
 
-	if(state_PC7){
-    GPIOJ->BSRR = (1U << 5);   // LED2 on
-	}else{GPIOJ->BSRR = (1U << (5+16)); }// LED2 off
-
-
-    if(state_PJ1){
-    GPIOA->BSRR = (1U << 12);
-    }else{GPIOA->BSRR = (1U << (12+16));}
-
-
-    if(state_PF6){//logic for this one is inversed
-	GPIOD->BSRR = (1U << (4+16));
-    }else{GPIOD->BSRR = (1U << 4);}
+    if (state_PF6) { // Logic for this one is inverted
+        GPIOD->BSRR = (1U << (4 + 16)); // Turn off PD4
+    } else {
+        GPIOD->BSRR = (1U << 4); // Turn on PD4
+    }
 }
 
-void drawScreen(){ //idk why the pointer fixes it but stackoverflow knows better then me
-	printf("\033[?25l"); // make the cursor invisible, just less jumpy
-	printf("\033[38;5;220m");//foreground
-    printf("\033[48;5;24m");//background
+//------------------------------------------------------------------------------------
+// Function to draw the screen
+//------------------------------------------------------------------------------------
+void drawScreen() {
+    printf("\033[?25l"); // Hide the cursor
+    printf("\033[38;5;220m"); // Set foreground color
+    printf("\033[48;5;24m"); // Set background color
     printf("\033[2;19H");
     printf("Enter <ESC> or <CTRL> + [ to terminate\r\n\n");
 
+    // Print a line of dashes to mark the start of the printable zone
     printf("\033[3;0H");
-    for(int i =0;i<80;i++){// line of dashes to show the start of the printable zone
-    	printf("-");
+    for (int i = 0; i < 80; i++) {
+        printf("-");
     }
 
-
+    // Print the buffer content
     for (int i = 0; i < 10; i++) {
-        printf("\033[%d;5H", i+4);          // move to row i+4, col 4
-        printf("%.*s", 72, arr[i]);         // print 72 chars from arr[i] in one go
+        printf("\033[%d;5H", i + 4); // Move to row i+4, column 5
+        printf("%.*s", 72, arr[i]); // Print 72 characters from the row
     }
 
-
+    // Print a line of dashes to mark the end of the printable zone
     printf("\033[14;0H");
-    for(int i =0;i<80;i++){	// line of dashes to show the end of the printable zone
-        	printf("-");
-        }
-
-
-    if (fault == 1){
-    	printf("\033[16;0H");
-    	printf("\033[38;5;196m");//foreground red
-    	printf("The received value $%x is ’not printable’ ",inputChar);
-    	printf("\033[38;5;220m");//foreground normal
-
-    	fflush(stdout);
-    	HAL_Delay(100);
-    	printf("\033[16;0H");
-    	printf("\033[48;5;196m");//background
-    	printf("The received value $%x is ’not printable’ ",inputChar);
-    	fflush(stdout);
-    	HAL_Delay(100);
-    	printf("\033[16;0H");
-    	printf("The received value $%x is ’not printable’ ",inputChar);
-    	printf("\033[48;5;24m");//background
-    	fflush(stdout);
-
-    }else{
-    	printf("\033[16;0H");
-		for(int i =0;i<80;i++){	// line of dashes to show the end of the printable zone
-				printf(" ");
-			}
+    for (int i = 0; i < 80; i++) {
+        printf("-");
     }
 
+    if (fault == 1) {
+        // Display error message for non-printable character
+        printf("\033[16;0H");
+        printf("\033[38;5;196m"); // Set foreground color to red
+        printf("The received value $%x is ’not printable’ ", inputChar);
+        printf("\033[38;5;220m"); // Reset foreground color
 
-	printf("\033[21;0H");
-	printf("# of Characters Received:");
-	printf("\033[22;0H");
-	printf("Printable             Non-Printable");
-	printf("\033[23;0H");
-	printf("%d",PrintChar);
-	printf("\033[23;22H");
-	printf("%d",NotPrintChar);
+        fflush(stdout);
+        HAL_Delay(100);
+        printf("\033[16;0H");
+        printf("\033[48;5;196m"); // Set background color to red
+        printf("The received value $%x is ’not printable’ ", inputChar);
+        fflush(stdout);
+        HAL_Delay(100);
+        printf("\033[16;0H");
+        printf("The received value $%x is ’not printable’ ", inputChar);
+        printf("\033[48;5;24m"); // Reset background color
+        fflush(stdout);
+    } else {
+        // Clear the error message area
+        printf("\033[16;0H");
+        for (int i = 0; i < 80; i++) {
+            printf(" ");
+        }
+    }
 
+    // Display character counts
+    printf("\033[21;0H");
+    printf("# of Characters Received:");
+    printf("\033[22;0H");
+    printf("Printable             Non-Printable");
+    printf("\033[23;0H");
+    printf("%d", PrintChar);
+    printf("\033[23;22H");
+    printf("%d", NotPrintChar);
 
-
-
-
-    printf("\033[?25h"); // make the cursor visible,
+    printf("\033[?25h"); // Show the cursor
     fflush(stdout);
-
-//    HAL_Delay(100);
 }
