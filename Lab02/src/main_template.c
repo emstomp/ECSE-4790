@@ -13,7 +13,7 @@
 // 2 = Part2 Register Timer
 // 3 = Part2 HAL Timer
 // 4 = Depth Task
-#define SELECT_PART 1
+#define SELECT_PART 4
 
 // ===========================================
 // Globals used by various parts
@@ -79,15 +79,21 @@ void Init_GPIO() {
     NVIC_EnableIRQ(EXTI9_5_IRQn);
 
     // PA0 as input, HAL-managed
-    __HAL_RCC_GPIOA_CLK_ENABLE();
-    GPIO_InitTypeDef GPIO_InitStruct;
-    GPIO_InitStruct.Pin = GPIO_PIN_0;
-    GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING_FALLING;
-    GPIO_InitStruct.Pull = GPIO_NOPULL;
-    HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+    // Inside Init_GPIO()
 
-    HAL_NVIC_SetPriority(EXTI0_IRQn, 0, 0);
-    HAL_NVIC_EnableIRQ(EXTI0_IRQn);
+    // HAL-managed EXTI on PC6
+    __HAL_RCC_GPIOC_CLK_ENABLE();
+
+    GPIO_InitTypeDef GPIO_InitStruct = {0};
+    GPIO_InitStruct.Pin  = GPIO_PIN_6;
+    GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING_FALLING; // interrupt mode
+    GPIO_InitStruct.Pull = GPIO_PULLDOWN;
+    HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
+
+    // NVIC config for EXTI line 6
+    HAL_NVIC_SetPriority(EXTI9_5_IRQn, 0, 0);
+    HAL_NVIC_EnableIRQ(EXTI9_5_IRQn);
+
 }
 
 void part1_main(void) {
@@ -108,17 +114,22 @@ void part1_main(void) {
 }
 
 void EXTI9_5_IRQHandler(void) {
+    // Handle register-based EXTI7
     if (EXTI->PR & (1U << 7)) {
         EXTI->PR |= (1U << 7);
         reg_button_pressed = 1;
     }
+
+    // Forward to HAL for EXTI6
+    HAL_GPIO_EXTI_IRQHandler(GPIO_PIN_6);
 }
 
+
 void EXTI0_IRQHandler(void) {
-    HAL_GPIO_EXTI_IRQHandler(GPIO_PIN_0);
+    HAL_GPIO_EXTI_IRQHandler(GPIO_PIN_6);
 }
 void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin) {
-    if (GPIO_Pin == GPIO_PIN_0) {
+    if (GPIO_Pin == GPIO_PIN_6) {
         hal_button_pressed = 1;
     }
 }
@@ -159,7 +170,16 @@ void TIM6_DAC_IRQHandler(void) {
 uint32_t period = 1;
 
 void Init_Timer_HAL(void) {
-    __HAL_RCC_TIM7_CLK_ENABLE();
+	GPIO_InitTypeDef GPIO_InitStruct = {0};
+
+	__HAL_RCC_GPIOJ_CLK_ENABLE();  // Enable clock for GPIOJ
+	GPIO_InitStruct.Pin = GPIO_PIN_13;
+	GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+	GPIO_InitStruct.Pull = GPIO_NOPULL;
+	GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+	HAL_GPIO_Init(GPIOJ, &GPIO_InitStruct);	// PJ13s
+
+	__HAL_RCC_TIM7_CLK_ENABLE();
     htim7.Instance = TIM7;
     htim7.Init.Prescaler = 108 - 1;   // 1 MHz
     htim7.Init.CounterMode = TIM_COUNTERMODE_UP;
@@ -169,6 +189,9 @@ void Init_Timer_HAL(void) {
 
     HAL_NVIC_SetPriority(TIM7_IRQn, 0, 0);
     HAL_NVIC_EnableIRQ(TIM7_IRQn);
+
+
+
 }
 
 void part2hal_main(void) {
@@ -179,15 +202,17 @@ void part2hal_main(void) {
 
 void TIM7_IRQHandler(void) {
     HAL_TIM_IRQHandler(&htim7);
+    HAL_GPIO_TogglePin(GPIOJ, GPIO_PIN_13);
 }
 
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim) {
     if (htim->Instance == TIM7) {
         printf("HAL Timer tick: %lu ms\r\n", period);
         period++;
-        if (period > 100) period = 1;
+        if (period > 100) {period = 1;}
         __HAL_TIM_SET_AUTORELOAD(htim, period * 1000 - 1);
-    }
+
+	}
 }
 #endif
 
@@ -195,6 +220,8 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim) {
 // Part 4: Depth Task (Button Number Entry)
 // ===========================================
 #if SELECT_PART == 4
+uint32_t nums [20];
+uint8_t ArrPos = 0;
 
 void Init_GPIO_Button(void) {
     RCC->AHB1ENR |= RCC_AHB1ENR_GPIOAEN;
@@ -234,15 +261,49 @@ void depth_main(void) {
 }
 
 void EXTI0_IRQHandler(void) {
-    if (EXTI->PR & (1U << 0)) {
-        EXTI->PR |= (1U << 0);
-        current_num = current_num * 10 + (digit_pos % 10);
-        digit_pos++;
-    }
+	uint8_t state = HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_0);
+
+
+
+
+	if (state) {
+
+		TIM6->CNT = 0;   // Reset TIMx counter to 0
+		HAL_TIM_Base_Start_IT(&htim6); //note to self mult by 10 and store
+
+
+
+	}else{
+		HAL_TIM_Base_Stop_IT(&htim6);
+		uint32_t time = __HAL_TIM_GET_COUNTER(&htim6);
+
+		if(time < 1000){
+			if ( (nums[ArrPos] += 1) == 9){
+				nums[ArrPos] = 0;
+			}else{
+				nums[ArrPos] += 1;
+			}
+
+		}else if (3000 > time > 1000){
+			ArrPos+=1;
+
+
+		}else if (3000> time){
+			for (int i =0;i<ArrPos+1;i++){
+				printf("%d: %d",i,nums[i]);
+			}
+		}
+
+	}
+
+
+
+
 }
 
 void TIM6_DAC_IRQHandler(void) {
-    if (TIM6->SR & TIM_SR_UIF) {
+
+	if (TIM6->SR & TIM_SR_UIF) {
         TIM6->SR &= ~TIM_SR_UIF;
         part4_accept_number();
     }
