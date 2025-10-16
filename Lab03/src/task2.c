@@ -58,7 +58,7 @@ int main(void) {
 // initialize GPIO
 void initGPIO() {
 
-	// LD3 ==> D13, A12
+	// initialize LED 3, PIN A12
 	GPIO_InitTypeDef GPIO_InitStruct = {0};
 	GPIO_InitStruct.Pin = GPIO_PIN_12;
 	GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
@@ -85,9 +85,9 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart) {
 	if (huart->Instance == USART1) {
 
 		if (UART1_rxBuffer[0] != '#' && UART1_rxLog[1] != '#') {
-			uart_print(&USB_UART, (char*) UART1_rxBuffer); 	// print out character to USART1
+			uart_print(&USB_UART, (char*) UART1_rxBuffer); 	// print out character over USART1
 		}
-		uart_print(&huart6, (char*) UART1_rxBuffer); 	// print out character to USART6
+		uart_print(&huart6, (char*) UART1_rxBuffer); 	// print out character over USART6
 
 		if (UART1_rxBuffer[0] == 27) {	// halt program
 			halt_program = 1;
@@ -114,7 +114,7 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart) {
 	} else if (huart->Instance == USART6) {
 
 		if (UART6_rxBuffer[0] != '#' && UART6_rxLog[1] != '#') {
-			uart_print(&USB_UART, (char*) UART6_rxBuffer); 	// print out character to UART1
+			uart_print(&USB_UART, (char*) UART6_rxBuffer); 	// print out character over UART1
 		}
 
 		if (UART6_rxBuffer[0] == 27) {	// halt program
@@ -129,9 +129,9 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart) {
 		if (UART6_rxBuffer[0] != '#') {
 			// print new lines
 			uart_print(&USB_UART, nl);
-
 		}
 
+		// command entered
 		if (UART6_rxLog[0] == '#') {
 			command(UART6_rxLog[1], huart);
 		}
@@ -140,7 +140,6 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart) {
 		HAL_UART_Receive_IT(&huart6, UART6_rxBuffer, 1);
 
 	}
-
 }
 
 // terminal control commands
@@ -153,8 +152,6 @@ void command(char c, UART_HandleTypeDef *huart) {
 			break;
 		case 'e':	// end program
 			halt_program = 1;
-			// char esc_char = 27;
-			// uart_putchar(&huart6, &esc_char); // send <ESC> to USART6
 			return;
 			break;
 		case 'i':	// toggle LED LD3

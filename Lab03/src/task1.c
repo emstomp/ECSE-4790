@@ -28,14 +28,14 @@ int main(void) {
 
 		// receive character from USART1
 		if (HAL_UART_Receive(&USB_UART, (uint8_t *)c1, 1, 10) == HAL_OK) {
-			uart_putchar(&USB_UART, c1);	// send character to USART1
-			uart_putchar(&huart6, c1);		// send character to USART6
+			uart_putchar(&USB_UART, c1);	// send character over USART1
+			uart_putchar(&huart6, c1);		// send character over USART6
 			halt_program(c1[0]);			// check if character == <ESC>
 		}
 
 		// receive character from USART6
 		if (HAL_UART_Receive(&huart6, (uint8_t *)c6, 1, 10) == HAL_OK) {
-			uart_putchar(&USB_UART, c6);	// send character to USART1
+			uart_putchar(&USB_UART, c6);	// send character over USART1
 			halt_program(c6[0]);			// check if character == <ESC>
 		}
 
