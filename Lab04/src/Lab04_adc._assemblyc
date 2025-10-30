@@ -19,11 +19,16 @@
    y = 0.3125*x0 + 0.240385*x1 + 0.3125*x2 + 0.296875*y1
    Q15 scale = 32768
 */
-#define Q15(x)    ((int32_t)((x) * 32768.0f + 0.5f))
-static const int32_t C0 = Q15(0.3125f);    // 10240
-static const int32_t C1 = Q15(0.240385f);  //  7865
-static const int32_t C2 = Q15(0.3125f);    // 10240
-static const int32_t A1 = Q15(0.296875f);  //  9728
+/* ----- Part 4 IIR (float, FPU-ASM) -----
+   y = 0.3125*x0 + 0.240385*x1 + 0.3125*x2 + 0.296875*y1
+*/
+static const float Cx0 = 0.3125f;     // x0
+static const float Cx1 = 0.240385f;   // x1
+static const float Cx2 = 0.3125f;     // x2
+static const float Cy1 = 0.296875f;   // y1
+
+static float fx1 = 0.f, fx2 = 0.f, fy1 = 0.f;   // filter state
+
 
 /* globals */
 static ADC_HandleTypeDef hadc1;
@@ -34,7 +39,7 @@ static TIM_HandleTypeDef htim6;   // DAC trigger timer (2*Fs)
 #endif
 
 /* IIR state (Q15 domain on 12-bit samples) */
-static int32_t x1=0, x2=0, y1=0;   // Q0 inputs promoted to Q15 in MACs
+
 
 /* latest/next outputs (for optional x2 interpolation) */
 static volatile uint16_t y_curr = 0, y_next = 0;
@@ -205,32 +210,65 @@ void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef *hadc)
 {
     if (hadc->Instance != ADC1) return;
 
-    int32_t x0 = (int32_t)(HAL_ADC_GetValue(&hadc1) & 0x0FFF); // 0..4095
+    /* current input sample (0..4095) as float */
+    float x0 = (float)(HAL_ADC_GetValue(&hadc1) & 0x0FFF);
+    float y;  /* output accumulator */
 
-    // Q15 MAC: acc = C0*x0 + C1*x1 + C2*x2 + A1*y1
-    // Inputs are Q0; coefficients Q15 => acc is Q15.
-    int32_t acc = 0;
-    acc += C0 * x0;
-    acc += C1 * x1;
-    acc += C2 * x2;
-    acc += A1 * y1;
-    acc >>= 15;                 // back to Q0 domain
+    /* Pointers for inline asm loads */
+    register const float *p_y1 = &fy1;
+    register const float *p_x2 = &fx2;
+    register const float *p_x1 = &fx1;
+    register const float *p_x0 = &x0;
 
-    if (acc < 0)       acc = 0;
-    else if (acc > 4095) acc = 4095;
+    register const float *pc_y1 = &Cy1;
+    register const float *pc_x2 = &Cx2;
+    register const float *pc_x1 = &Cx1;
+    register const float *pc_x0 = &Cx0;
 
-    // shift state
-    x2 = x1; x1 = x0; y1 = acc;  // store y1 in Q0, ok (we only multiply by Q15 next time)
+    /*  y = Cy1*y1
+        y += Cx2*x2
+        y += Cx1*x1
+        y += Cx0*x0
+        (All in FPU using VMLA.F32)  */
+    __asm volatile(
+        "vldr    s0, [%[py1]]      \n"  /* s0 = y1        */
+        "vldr    s1, [%[c_y1]]     \n"  /* s1 = Cy1       */
+        "vmul.f32 s0, s0, s1       \n"  /* s0 = Cy1*y1    */
 
-#if ENABLE_DAC_X2_UPSAMP
-    // produce next pair for the DAC ISR
-    y_next = (uint16_t)acc;
-    y_curr = y_next;   // ensures continuity; DAC ISR interpolates mid-points
-#else
-    // direct write at Fs
-    HAL_DAC_SetValue(&hdac, DAC_CH, DAC_ALIGN_12B_R, (uint16_t)acc);
-#endif
+        "vldr    s2, [%[px2]]      \n"  /* s2 = x2        */
+        "vldr    s3, [%[c_x2]]     \n"  /* s3 = Cx2       */
+        "vmla.f32 s0, s2, s3       \n"  /* s0 += Cx2*x2   */
+
+        "vldr    s4, [%[px1]]      \n"  /* s4 = x1        */
+        "vldr    s5, [%[c_x1]]     \n"  /* s5 = Cx1       */
+        "vmla.f32 s0, s4, s5       \n"  /* s0 += Cx1*x1   */
+
+        "vldr    s6, [%[px0]]      \n"  /* s6 = x0        */
+        "vldr    s7, [%[c_x0]]     \n"  /* s7 = Cx0       */
+        "vmla.f32 s0, s6, s7       \n"  /* s0 += Cx0*x0   */
+
+        "vstr    s0, [%[py]]       \n"  /* store y        */
+        :
+        : [py1]  "r"(p_y1),
+          [px2]  "r"(p_x2),
+          [px1]  "r"(p_x1),
+          [px0]  "r"(p_x0),
+          [c_y1] "r"(pc_y1),
+          [c_x2] "r"(pc_x2),
+          [c_x1] "r"(pc_x1),
+          [c_x0] "r"(pc_x0),
+          [py]   "r"(&y)
+        : "s0","s1","s2","s3","s4","s5","s6","s7","memory","cc"
+    );
+
+    /* shift state and output */
+    fx2 = fx1; fx1 = x0; fy1 = y;
+
+    /* clamp to 12-bit and send to DAC */
+    uint16_t out = (y <= 0.f) ? 0 : (y >= 4095.f ? 4095 : (uint16_t)(y + 0.5f));
+    HAL_DAC_SetValue(&hdac, DAC_CHANNEL_1, DAC_ALIGN_12B_R, out);
 }
+
 
 /* required IRQ wrapper */
 void ADC_IRQHandler(void)
