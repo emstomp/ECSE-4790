@@ -135,9 +135,14 @@ void task_set_2() {
 	printf("task set 2.3: %f\r\n\n", (double) res3);
 
 	// 4. evaluate equation (2x/3) + 5 with MAC commands
-	float f = 2.0 / 3.0;
+	float a = 2.0;
+	float b = 3.0;
+	float f;
+	asm("VDIV.F32 %[out], %[in1], %[in2]"	// f = a/b = 2.0/3.0
+				: [out] "=t" (f)
+				: [in1] "t" (a), [in2] "t" (b));
 	float res4 = 5.0;
-	asm volatile ("VMLA.F32 %[out], %[in1], %[in2]"	// res4 = 2.0 * x + 15.0
+	asm volatile ("VMLA.F32 %[out], %[in1], %[in2]"	// res4 = 2.0/3.0 * x + 5
 				: [out] "+&t" (res4)
 				: [in1] "t" (x) , [in2] "t" (f));
 	printf("task set 2.4: %f\r\n\n", (double) res4);
