@@ -1,243 +1,239 @@
 //--------------------------------
-// Lab 4 - Sample - Lab04_sample.c
+// Lab 4 - Part 4: high-Fs + Q15 IIR (+optional x2 upsampler)
+// STM32F769I-DISCO  |  ADC: PA6 (ADC1_IN6)  |  DAC: PA4 (DAC1_OUT1)
 //--------------------------------
-
 #include "init.h"
 #include "stm32f7xx_hal.h"
-#include <stdio.h>
 #include <stdint.h>
-#include <string.h>
-#include <stdbool.h>
 
-/* =========================
-   SELECT WHAT TO RUN
-   ========================= */
+/* ===== knobs ===== */
+#define FS_HZ                 192000U                 // ADC sample rate (push high to reduce steps)
+#define ADC_SAMPLE_TIME       ADC_SAMPLETIME_3CYCLES  // short sample; raise if your source is high-Z
+#define ENABLE_DAC_X2_UPSAMP  0                       // 1 = drive DAC at 2*Fs with linear interp
 
-#define RUN_TASK2_ADC_TO_DAC        0   // Pass-through: ADC1 (PA6) -> DAC1 (PA4)
+/* pins/channels */
+#define ADC_CH    ADC_CHANNEL_6   // A0 = PA6
+#define DAC_CH    DAC_CHANNEL_1   // A1 = PA4
 
-/* ===== Pins / Channels =====
-   ADC input : PA6  (Arduino A0) -> ADC1_IN6
-   DAC output: PA4  (Arduino A1) -> DAC1_OUT1
+/* Q15 coefficients for Part-4 IIR:
+   y = 0.3125*x0 + 0.240385*x1 + 0.3125*x2 + 0.296875*y1
+   Q15 scale = 32768
 */
-#define VREF_MV                     3300U
-#define ADC_MAX                     4095U
+#define Q15(x)    ((int32_t)((x) * 32768.0f + 0.5f))
+static const int32_t C0 = Q15(0.3125f);    // 10240
+static const int32_t C1 = Q15(0.240385f);  //  7865
+static const int32_t C2 = Q15(0.3125f);    // 10240
+static const int32_t A1 = Q15(0.296875f);  //  9728
 
-/* ===== Task 1 timing ===== */
-#define SAMPLE_PERIOD_MS            1U
-#define WINDOW_MS                   1000000U
-#define RING_LEN                    (WINDOW_MS / SAMPLE_PERIOD_MS)
-
-/* ====== Globals ====== */
+/* globals */
 static ADC_HandleTypeDef hadc1;
 static DAC_HandleTypeDef hdac;
-uint32_t ADCBuffer[3] = {0,0,0};
-uint8_t uint32_tIndex = 0;
-uint32_t PrevDACVal = 0;
+static TIM_HandleTypeDef htim2;   // ADC trigger timer
+#if ENABLE_DAC_X2_UPSAMP
+static TIM_HandleTypeDef htim6;   // DAC trigger timer (2*Fs)
+#endif
 
-/* Prototypes */
-static void configureADC_single(void);
-static void configureADC_continuous(void);
-static void configureDAC(void);
-static void Error_Handler(const char *msg);
-uint32_t filter(void);
+/* IIR state (Q15 domain on 12-bit samples) */
+static int32_t x1=0, x2=0, y1=0;   // Q0 inputs promoted to Q15 in MACs
 
-/* MSP hooks */
-void HAL_ADC_MspInit(ADC_HandleTypeDef *hadc);
-void HAL_DAC_MspInit(DAC_HandleTypeDef *hdac);
+/* latest/next outputs (for optional x2 interpolation) */
+static volatile uint16_t y_curr = 0, y_next = 0;
 
-/* Helpers */
-static inline uint32_t adc_to_mV(uint32_t raw)
-{
-    return (raw * VREF_MV) / ADC_MAX;
-}
+/* protos */
+static void nvic_enable(void);
+static void tim2_init_forFs(uint32_t fs_hz);
+static void adc_init_trgo(void);
+static void dac_init(void);
+#if ENABLE_DAC_X2_UPSAMP
+static void tim6_init_for2Fs(uint32_t fs_hz);
+#endif
+static inline uint16_t sat12_q15(int32_t acc);
 
+/* ===== MAIN ===== */
 int main(void)
 {
     Sys_Init();
 
-
-#if RUN_TASK2_ADC_TO_DAC
-    // Use single-conversion config instead of continuous
-    configureADC_single();
-    configureDAC();
-
-    //printf("\r\n[Task 2B] ADC1 (PA6) -> DAC1 (PA4) pass-through. Feed a sine into A0.\r\n");
-
-    while (1) {
-        if (HAL_ADC_Start(&hadc1) != HAL_OK) Error_Handler("ADC_Start");
-        if (HAL_ADC_PollForConversion(&hadc1, 10) == HAL_OK) {
-            uint32_t raw = HAL_ADC_GetValue(&hadc1) & 0x0FFF;  // 12-bit sample
-            HAL_DAC_SetValue(&hdac, DAC_CHANNEL_1, DAC_ALIGN_12B_R, raw);
-        }
-        HAL_ADC_Stop(&hadc1);
-        // Optional tiny delay to reduce CPU hammering; comment out for max rate
-        // HAL_Delay(1);
-    }
+    nvic_enable();
+    tim2_init_forFs(FS_HZ);
+    adc_init_trgo();
+    dac_init();
+#if ENABLE_DAC_X2_UPSAMP
+    tim6_init_for2Fs(FS_HZ);
 #endif
 
-    configureADC_continuous();
-    configureDAC();
-    HAL_ADC_Start(&hadc1);
+    HAL_ADC_Start_IT(&hadc1);
+    HAL_TIM_Base_Start(&htim2);
+#if ENABLE_DAC_X2_UPSAMP
+    HAL_TIM_Base_Start(&htim6);
+#endif
 
-    if (HAL_ADC_PollForConversion(&hadc1, 10) == HAL_OK) {
-    	uint32_t raw = HAL_ADC_GetValue(&hadc1) & 0x0FFF;  	// 12-bit sample
-    	// store adc value
-    	ADCBuffer[2] = ADCBuffer[1];
-    	ADCBuffer[1] = ADCBuffer[0];
-    	ADCBuffer[0] = raw;
-    	uint32_t dacVal = filter();
-    	HAL_DAC_SetValue(&hdac, DAC_CHANNEL_1, DAC_ALIGN_12B_R, dacVal);
-    	PrevDACVal = dacVal;
-
+    while (1) {
+        // work happens in callbacks
     }
-
-
-    while (1) { }
 }
 
-/* ===== ADC Configs ===== */
-static void configureADC_single(void)
+/* ===== NVIC ===== */
+static void nvic_enable(void)
+{
+    HAL_NVIC_SetPriority(ADC_IRQn, 1, 0);
+    HAL_NVIC_EnableIRQ(ADC_IRQn);
+#if ENABLE_DAC_X2_UPSAMP
+    HAL_NVIC_SetPriority(TIM6_DAC_IRQn, 2, 0);
+    HAL_NVIC_EnableIRQ(TIM6_DAC_IRQn);
+#endif
+}
+
+/* ===== TIM2 -> TRGO at Fs ===== */
+static void tim2_init_forFs(uint32_t fs_hz)
+{
+    __HAL_RCC_TIM2_CLK_ENABLE();
+
+    uint32_t pclk1 = HAL_RCC_GetPCLK1Freq();
+    uint32_t ppre1 = ((RCC->CFGR >> 10) & 7U);
+    uint32_t tclk  = (ppre1 >= 4) ? (pclk1 * 2U) : pclk1;
+
+    uint32_t psc = (tclk / 1000000U) - 1U;       // 1 MHz tick
+    uint32_t arr = (1000000U / fs_hz) - 1U;      // Fs
+
+    htim2.Instance = TIM2;
+    htim2.Init.Prescaler         = psc;
+    htim2.Init.CounterMode       = TIM_COUNTERMODE_UP;
+    htim2.Init.Period            = arr;
+    htim2.Init.ClockDivision     = TIM_CLOCKDIVISION_DIV1;
+    htim2.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+    HAL_TIM_Base_Init(&htim2);
+
+    TIM_MasterConfigTypeDef m = {0};
+    m.MasterOutputTrigger = TIM_TRGO_UPDATE;
+    m.MasterSlaveMode     = TIM_MASTERSLAVEMODE_DISABLE;
+    HAL_TIMEx_MasterConfigSynchronization(&htim2, &m);
+}
+
+/* ===== ADC (ext-triggered by TIM2 TRGO) ===== */
+static void adc_init_trgo(void)
 {
     __HAL_RCC_ADC1_CLK_ENABLE();
+    __HAL_RCC_GPIOA_CLK_ENABLE();
+
+    GPIO_InitTypeDef g = {0};
+    g.Pin = GPIO_PIN_6; g.Mode = GPIO_MODE_ANALOG; g.Pull = GPIO_NOPULL;
+    HAL_GPIO_Init(GPIOA, &g);
 
     hadc1.Instance = ADC1;
-    hadc1.Init.ClockPrescaler        = ADC_CLOCK_SYNC_PCLK_DIV4;
+    hadc1.Init.ClockPrescaler        = ADC_CLOCK_SYNC_PCLK_DIV4;   // ~27 MHz ADC clk (<=36 MHz)
     hadc1.Init.Resolution            = ADC_RESOLUTION_12B;
     hadc1.Init.DataAlign             = ADC_DATAALIGN_RIGHT;
     hadc1.Init.ScanConvMode          = ADC_SCAN_DISABLE;
-    hadc1.Init.ContinuousConvMode    = DISABLE;
+    hadc1.Init.ContinuousConvMode    = DISABLE;                    // driven by timer
     hadc1.Init.DiscontinuousConvMode = DISABLE;
     hadc1.Init.NbrOfConversion       = 1;
-    hadc1.Init.ExternalTrigConvEdge  = ADC_EXTERNALTRIGCONVEDGE_NONE;
-    hadc1.Init.ExternalTrigConv      = ADC_SOFTWARE_START;
+    hadc1.Init.ExternalTrigConvEdge  = ADC_EXTERNALTRIGCONVEDGE_RISING;
+    hadc1.Init.ExternalTrigConv      = ADC_EXTERNALTRIGCONV_T2_TRGO;
     hadc1.Init.DMAContinuousRequests = DISABLE;
     hadc1.Init.EOCSelection          = ADC_EOC_SINGLE_CONV;
-    if (HAL_ADC_Init(&hadc1) != HAL_OK) Error_Handler("HAL_ADC_Init (single)");
+    HAL_ADC_Init(&hadc1);
 
-    ADC_ChannelConfTypeDef sConfig = {0};
-    sConfig.Channel      = ADC_CHANNEL_6;           // PA6
-    sConfig.Rank         = 1;
-    sConfig.SamplingTime = ADC_SAMPLETIME_56CYCLES;
-    if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK) Error_Handler("HAL_ADC_ConfigChannel");
+    ADC_ChannelConfTypeDef s = {0};
+    s.Channel      = ADC_CH;
+    s.Rank         = 1;
+    s.SamplingTime = ADC_SAMPLE_TIME;  // 3 cycles → total ~15.5 cycles
+    HAL_ADC_ConfigChannel(&hadc1, &s);
 }
 
-static void configureADC_continuous(void)
-{
-    __HAL_RCC_ADC1_CLK_ENABLE();
-
-    hadc1.Instance = ADC1;
-    hadc1.Init.ClockPrescaler        = ADC_CLOCK_SYNC_PCLK_DIV4;
-    hadc1.Init.Resolution            = ADC_RESOLUTION_12B;
-    hadc1.Init.DataAlign             = ADC_DATAALIGN_RIGHT;
-    hadc1.Init.ScanConvMode          = ADC_SCAN_DISABLE;
-    hadc1.Init.ContinuousConvMode    = ENABLE;
-    hadc1.Init.DiscontinuousConvMode = DISABLE;
-    hadc1.Init.NbrOfConversion       = 1;
-    hadc1.Init.ExternalTrigConvEdge  = ADC_EXTERNALTRIGCONVEDGE_NONE;
-    hadc1.Init.ExternalTrigConv      = ADC_SOFTWARE_START;
-    hadc1.Init.DMAContinuousRequests = DISABLE;
-    hadc1.Init.EOCSelection          = ADC_EOC_SINGLE_CONV;
-    if (HAL_ADC_Init(&hadc1) != HAL_OK) Error_Handler("HAL_ADC_Init (cont)");
-
-    ADC_ChannelConfTypeDef sConfig = {0};
-    sConfig.Channel      = ADC_CHANNEL_6;           // PA6
-    sConfig.Rank         = 1;
-    sConfig.SamplingTime = ADC_SAMPLETIME_56CYCLES;
-    if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK) Error_Handler("HAL_ADC_ConfigChannel");
-}
-
-/* ===== DAC Config ===== */
-static void configureDAC(void)
+/* ===== DAC direct-write (buffer ON) ===== */
+static void dac_init(void)
 {
     __HAL_RCC_DAC_CLK_ENABLE();
+    __HAL_RCC_GPIOA_CLK_ENABLE();
+
+    GPIO_InitTypeDef g = {0};
+    g.Pin = GPIO_PIN_4; g.Mode = GPIO_MODE_ANALOG; g.Pull = GPIO_NOPULL;
+    HAL_GPIO_Init(GPIOA, &g);
 
     hdac.Instance = DAC;
-    if (HAL_DAC_Init(&hdac) != HAL_OK) Error_Handler("HAL_DAC_Init");
+    HAL_DAC_Init(&hdac);
 
-    DAC_ChannelConfTypeDef sConf = {0};
-    sConf.DAC_Trigger      = DAC_TRIGGER_NONE;
-    sConf.DAC_OutputBuffer = DAC_OUTPUTBUFFER_ENABLE;
-    if (HAL_DAC_ConfigChannel(&hdac, &sConf, DAC_CHANNEL_1) != HAL_OK)
-        Error_Handler("HAL_DAC_ConfigChannel");
-
-    if (HAL_DAC_Start(&hdac, DAC_CHANNEL_1) != HAL_OK)
-        Error_Handler("HAL_DAC_Start");
+    DAC_ChannelConfTypeDef c = {0};
+    c.DAC_Trigger      = DAC_TRIGGER_NONE;        // we push each sample
+    c.DAC_OutputBuffer = DAC_OUTPUTBUFFER_ENABLE;
+    HAL_DAC_ConfigChannel(&hdac, &c, DAC_CH);
+    HAL_DAC_Start(&hdac, DAC_CH);
 }
 
-/* ===== MSP INIT: GPIO + Clocks ===== */
-void HAL_ADC_MspInit(ADC_HandleTypeDef *hadc)
+#if ENABLE_DAC_X2_UPSAMP
+/* ===== TIM6 -> optional 2*Fs DAC tick (linear interp) ===== */
+static void tim6_init_for2Fs(uint32_t fs_hz)
 {
-    if (hadc->Instance == ADC1) {
-        __HAL_RCC_GPIOA_CLK_ENABLE();
-        GPIO_InitTypeDef GPIO_InitStruct = {0};
-        // PA6 -> ADC1_IN6 (A0)
-        GPIO_InitStruct.Pin  = GPIO_PIN_6;
-        GPIO_InitStruct.Mode = GPIO_MODE_ANALOG;
-        GPIO_InitStruct.Pull = GPIO_NOPULL;
-        HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+    __HAL_RCC_TIM6_CLK_ENABLE();
+
+    uint32_t pclk1 = HAL_RCC_GetPCLK1Freq();
+    uint32_t ppre1 = ((RCC->CFGR >> 10) & 7U);
+    uint32_t tclk  = (ppre1 >= 4) ? (pclk1 * 2U) : pclk1;
+
+    uint32_t psc = (tclk / 1000000U) - 1U;                 // 1 MHz
+    uint32_t arr = (1000000U / (2U*fs_hz)) - 1U;           // 2*Fs
+
+    htim6.Instance = TIM6;
+    htim6.Init.Prescaler         = psc;
+    htim6.Init.CounterMode       = TIM_COUNTERMODE_UP;
+    htim6.Init.Period            = arr;
+    htim6.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+    HAL_TIM_Base_Init(&htim6);
+
+    __HAL_TIM_CLEAR_FLAG(&htim6, TIM_FLAG_UPDATE);
+    __HAL_TIM_ENABLE_IT(&htim6, TIM_IT_UPDATE);
+}
+
+/* IRQ: push y_curr / mid-point between y_curr and y_next */
+void TIM6_DAC_IRQHandler(void)
+{
+    if (__HAL_TIM_GET_FLAG(&htim6, TIM_FLAG_UPDATE) != RESET) {
+        if (__HAL_TIM_GET_IT_SOURCE(&htim6, TIM_IT_UPDATE) != RESET) {
+            __HAL_TIM_CLEAR_IT(&htim6, TIM_IT_UPDATE);
+            static uint8_t phase = 0;
+            uint16_t out = (!phase) ? y_curr : (uint16_t)((y_curr + y_next) >> 1);
+            phase ^= 1;
+            HAL_DAC_SetValue(&hdac, DAC_CH, DAC_ALIGN_12B_R, out);
+        }
     }
 }
+#endif
 
-void HAL_DAC_MspInit(DAC_HandleTypeDef *hdac)
+/* ===== ADC EOC ISR: Q15 IIR, update DAC (or y_next for x2 mode) ===== */
+void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef *hadc)
 {
-    if (hdac->Instance == DAC) {
-        __HAL_RCC_GPIOA_CLK_ENABLE();
-        GPIO_InitTypeDef GPIO_InitStruct = {0};
-        // PA4 -> DAC_OUT1 (A1)
-        GPIO_InitStruct.Pin  = GPIO_PIN_4;
-        GPIO_InitStruct.Mode = GPIO_MODE_ANALOG;
-        GPIO_InitStruct.Pull = GPIO_NOPULL;
-        HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
-    }
+    if (hadc->Instance != ADC1) return;
+
+    int32_t x0 = (int32_t)(HAL_ADC_GetValue(&hadc1) & 0x0FFF); // 0..4095
+
+    // Q15 MAC: acc = C0*x0 + C1*x1 + C2*x2 + A1*y1
+    // Inputs are Q0; coefficients Q15 => acc is Q15.
+    int32_t acc = 0;
+    acc += C0 * x0;
+    acc += C1 * x1;
+    acc += C2 * x2;
+    acc += A1 * y1;
+    acc >>= 15;                 // back to Q0 domain
+
+    if (acc < 0)       acc = 0;
+    else if (acc > 4095) acc = 4095;
+
+    // shift state
+    x2 = x1; x1 = x0; y1 = acc;  // store y1 in Q0, ok (we only multiply by Q15 next time)
+
+#if ENABLE_DAC_X2_UPSAMP
+    // produce next pair for the DAC ISR
+    y_next = (uint16_t)acc;
+    y_curr = y_next;   // ensures continuity; DAC ISR interpolates mid-points
+#else
+    // direct write at Fs
+    HAL_DAC_SetValue(&hdac, DAC_CH, DAC_ALIGN_12B_R, (uint16_t)acc);
+#endif
 }
 
-/* ===== Error Handler ===== */
-static void Error_Handler(const char *msg)
+/* required IRQ wrapper */
+void ADC_IRQHandler(void)
 {
-   // printf("ERROR: %s\r\n", msg);
-    while (1) { }
+    HAL_ADC_IRQHandler(&hadc1);
 }
-
-uint32_t filter() {
-
-	uint32_t y_k1 = PrevDACVal;
-
-	float x_k0 = ADCBuffer[0];
-	float x_k1 = ADCBuffer[1];
-	float x_k2 = ADCBuffer[2];
-
-	uint32_t output = 0.3125f * x_k0 + 0.240385f * x_k1
-						+ 0.3125f * x_k2 + 0.296875f * y_k1;
-
-	/*
-	// MAC instructions
-	float y_k1f = y_k1;
-	float res = 0.0;
-	float c1 = 0.296875;
-	float c2 = 0.3125;
-	float c3 = 0.240385;
-	float c4 = 0.3125;
-
-	// res = 0.296875 * y_k1 + 0
-	asm volatile ("VMLA.F32 %[out], %[in1], %[in2]"
-				: [out] "+&t" (res)
-				: [in1] "t" (y_k1f) , [in2] "t" (c1));
-	// res = 0.315 * x_k2 + res
-	asm volatile ("VMLA.F32 %[out], %[in1], %[in2]"
-				: [out] "+&t" (res)
-				: [in1] "t" (x_k2) , [in2] "t" (c2));
-	// res = 0.240385 * x_k1 + res
-	asm volatile ("VMLA.F32 %[out], %[in1], %[in2]"
-				: [out] "+&t" (res)
-				: [in1] "t" (x_k1) , [in2] "t" (c3));
-	// res = 0.3125 * x_k0 + res
-	asm volatile ("VMLA.F32 %[out], %[in1], %[in2]"
-				: [out] "+&t" (res)
-				: [in1] "t" (x_k0) , [in2] "t" (c4));
-	*/
-
-	PrevDACVal = output;
-	return output;
-
-}
-
